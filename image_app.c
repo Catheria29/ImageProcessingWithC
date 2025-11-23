@@ -182,7 +182,6 @@ Image *shrink_avg(const Image *src, int factor) {
 }
 
 /* ------------------ Filters (box, gaussian, median) ------------------ */
-/* (Unchanged implementations similar to previously provided) */
 
 Image *box_filter(const Image *src, int ksize) {
     if (ksize <= 1) return duplicate_image(src);
@@ -433,7 +432,7 @@ int main(void) {
         int opt; if (scanf("%d", &opt) != 1) { read_line_discard(); continue; } read_line_discard();
         if (opt == 0) break;
         if (opt == 1) {
-            read_string_prompt("Enter filename to load (PGM P2/P5): ", filename, sizeof(filename));
+            read_string_prompt("Enter file path to load (PGM P2/P5): ", filename, sizeof(filename));
             Image *tmp = load_pgm(filename);
             if (!tmp) printf("Failed to load %s\n", filename);
             else {
