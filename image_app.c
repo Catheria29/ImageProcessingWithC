@@ -1,15 +1,20 @@
 // image_app.c
 // Single-file PGM image processing application (supports P2 and P5)
-// Includes bilinear zoom, shrink (block average), filters, edges, LBP, diagnostics
+// Includes nearest neighbor zoom, shrink (block average), filters, edges, LBP, diagnostics
 // Compile: gcc -O2 -std=c99 -lm image_app.c -o image_app
 
-#define _XOPEN_SOURCE 700
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#include <math.h>
+#define _XOPEN_SOURCE 700 // Enable POSIX features for compatibility
+#include <stdio.h>        // Standard I/O functions
+#include <stdlib.h>       // Memory allocation, process control
+#include <string.h>       // String manipulation functions
+#include <ctype.h>        // Character type functions
+#include <math.h>         // Math functions (e.g., round, hypot)
 
+// Image structure to hold grayscale image data
+// width: number of columns
+// height: number of rows
+// maxval: maximum pixel value (PGM standard, normalized to 255 internally)
+// data: pointer to pixel data (row-major order)
 typedef struct {
     int width;
     int height;
@@ -18,40 +23,47 @@ typedef struct {
 } Image;
 
 /* ------------------ Utility ------------------ */
+// Print error message and exit program
 static void die(const char *msg) { fprintf(stderr, "Error: %s\n", msg); exit(EXIT_FAILURE); }
+
+// Allocate and initialize an Image structure
 Image *create_image(int w, int h, int maxv) {
     Image *img = (Image*)malloc(sizeof(Image));
-    if (!img) die("out of memory");
+    if (!img) die("out of memory"); // Check allocation
     img->width = w; img->height = h; img->maxval = maxv;
-    img->data = (unsigned char*)calloc((size_t)w * h, sizeof(unsigned char));
+    img->data = (unsigned char*)calloc((size_t)w * h, sizeof(unsigned char)); // Zero-initialize pixel data
     if (!img->data) die("out of memory");
     return img;
 }
+
+// Free memory used by an Image
 void free_image(Image *img) { if (!img) return; free(img->data); free(img); }
 
 /* skip whitespace and comments, return next non-space char (stream left at it) */
+// Helper for PGM parsing: skips whitespace and comments, returns next non-space character
 static int next_nonspace(FILE *f) {
     int c;
     while ((c = fgetc(f)) != EOF) {
-        if (isspace(c)) continue;
-        if (c == '#') {
+        if (isspace(c)) continue; // Skip whitespace
+        if (c == '#') {           // Skip comment lines
             while ((c = fgetc(f)) != EOF && c != '\n');
             continue;
         }
-        ungetc(c, f);
+        ungetc(c, f); // Put back non-space character
         return c;
     }
     return EOF;
 }
 
 /* ------------------ PGM I/O ------------------ */
+// Load a PGM image from file (supports P2 and P5 formats)
 Image *load_pgm(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(path, "rb"); // Open file for reading (binary mode)
     if (!f) return NULL;
-    char magic[3] = {0};
+    char magic[3] = {0}; // Magic number (P2 or P5)
     if (fscanf(f, "%2s", magic) != 1) { fclose(f); return NULL; }
     if (strcmp(magic, "P2") != 0 && strcmp(magic, "P5") != 0) { fclose(f); return NULL; }
-    int ascii = (strcmp(magic, "P2") == 0);
+    int ascii = (strcmp(magic, "P2") == 0); // Determine format
     if (next_nonspace(f) == EOF) { fclose(f); return NULL; }
     int w, h, maxv;
     if (fscanf(f, "%d", &w) != 1) { fclose(f); return NULL; }
@@ -60,23 +72,26 @@ Image *load_pgm(const char *path) {
     if (next_nonspace(f) == EOF) { fclose(f); return NULL; }
     if (fscanf(f, "%d", &maxv) != 1) { fclose(f); return NULL; }
     if (maxv <= 0 || maxv > 65535) { fclose(f); return NULL; }
-    int c = fgetc(f);
+    int c = fgetc(f); // Skip whitespace after header
     if (c == '\r') { int c2 = fgetc(f); if (c2 != '\n') ungetc(c2, f); }
     else if (c != '\n' && !isspace(c)) ungetc(c, f);
-    Image *img = create_image(w, h, maxv);
+    Image *img = create_image(w, h, maxv); // Allocate image
     size_t npix = (size_t)w * h;
     if (ascii) {
+        // Read pixel values as ASCII integers
         for (size_t i=0; i < npix; ++i) {
             int v; if (fscanf(f, "%d", &v) != 1) { free_image(img); fclose(f); return NULL; }
-            if (v < 0) v = 0; if (v > img->maxval) v = img->maxval;
+            if (v < 0) v = 0; if (v > img->maxval) v = img->maxval; // Clamp value
             if (img->maxval == 255) img->data[i] = (unsigned char)v;
-            else img->data[i] = (unsigned char) round((double)v * 255.0 / img->maxval);
+            else img->data[i] = (unsigned char) round((double)v * 255.0 / img->maxval); // Normalize
         }
     } else {
+        // Read pixel values as raw bytes
         if (img->maxval < 256) {
             size_t read = fread(img->data, 1, npix, f);
             if (read != npix) { free_image(img); fclose(f); return NULL; }
         } else {
+            // For 16-bit PGM, read two bytes per pixel
             for (size_t i=0; i < npix; ++i) {
                 int hi = fgetc(f); int lo = fgetc(f);
                 if (hi == EOF || lo == EOF) { free_image(img); fclose(f); return NULL; }
@@ -87,24 +102,27 @@ Image *load_pgm(const char *path) {
         }
     }
     fclose(f);
-    img->maxval = 255;
+    img->maxval = 255; // Normalize maxval
     return img;
 }
 
+// Save an Image to a PGM file (P2 or P5 format)
 int save_pgm(const Image *img, const char *path, int ascii) {
     if (!img) return 0;
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(path, "wb"); // Open file for writing
     if (!f) return 0;
     if (ascii) {
+        // Write ASCII header and pixel data
         fprintf(f, "P2\n# Created by image_app\n%d %d\n255\n", img->width, img->height);
         size_t np = (size_t)img->width * img->height;
-        int perline = 17;
+        int perline = 17; // Pixels per line for readability
         for (size_t i = 0; i < np; ++i) {
             fprintf(f, "%d", img->data[i]);
             if ((i % perline) == perline-1 || i == np-1) fprintf(f, "\n");
             else fprintf(f, " ");
         }
     } else {
+        // Write binary header and pixel data
         fprintf(f, "P5\n# Created by image_app\n%d %d\n255\n", img->width, img->height);
         size_t np = (size_t)img->width * img->height;
         size_t written = fwrite(img->data, 1, np, f);
@@ -115,51 +133,38 @@ int save_pgm(const Image *img, const char *path, int ascii) {
 }
 
 /* ------------------ Basic ops ------------------ */
+// Create a duplicate of the source image (shallow copy of data)
 Image *duplicate_image(const Image *src) {
     Image *dst = create_image(src->width, src->height, src->maxval);
     memcpy(dst->data, src->data, (size_t)src->width * src->height);
     return dst;
 }
 
-/* Bilinear zoom by integer factor (>=1) */
-Image *zoom_bilinear(const Image *src, int factor) {
+/* Nearest-neighbor zoom by integer factor (>=1) */
+// Create a zoomed image using nearest-neighbor interpolation
+Image *zoom_nearest_neighbor(const Image *src, int factor) {
     if (factor <= 0) return NULL;
-    if (factor == 1) return duplicate_image(src);
+    if (factor == 1) return duplicate_image(src); // No zoom
     int w_out = src->width * factor;
     int h_out = src->height * factor;
     Image *dst = create_image(w_out, h_out, 255);
     for (int y_out = 0; y_out < h_out; ++y_out) {
-        double gy = (double)y_out / (double)factor;
-        int y0 = (int)floor(gy);
-        int y1 = y0 + 1;
-        double wy = gy - y0;
-        if (y0 < 0) y0 = 0;
-        if (y1 >= src->height) y1 = src->height - 1;
+        int y_src = y_out / factor;
+        if (y_src >= src->height) y_src = src->height - 1;
         for (int x_out = 0; x_out < w_out; ++x_out) {
-            double gx = (double)x_out / (double)factor;
-            int x0 = (int)floor(gx);
-            int x1 = x0 + 1;
-            double wx = gx - x0;
-            if (x0 < 0) x0 = 0;
-            if (x1 >= src->width) x1 = src->width - 1;
-            // fetch four neighbors
-            unsigned char I00 = src->data[y0*src->width + x0];
-            unsigned char I10 = src->data[y0*src->width + x1];
-            unsigned char I01 = src->data[y1*src->width + x0];
-            unsigned char I11 = src->data[y1*src->width + x1];
-            double val = (1-wx)*(1-wy)*I00 + wx*(1-wy)*I10 + (1-wx)*wy*I01 + wx*wy*I11;
-            int iv = (int)round(val);
-            if (iv < 0) iv = 0; if (iv > 255) iv = 255;
-            dst->data[y_out*w_out + x_out] = (unsigned char)iv;
+            int x_src = x_out / factor;
+            if (x_src >= src->width) x_src = src->width - 1;
+            dst->data[y_out*w_out + x_out] = src->data[y_src*src->width + x_src];
         }
     }
     return dst;
 }
 
 /* Shrink by integer factor using block average */
+// Create a shrunk image by averaging pixel blocks
 Image *shrink_avg(const Image *src, int factor) {
     if (factor <= 0) return NULL;
-    if (factor == 1) return duplicate_image(src);
+    if (factor == 1) return duplicate_image(src); // No shrink
     int w = src->width / factor; if (w < 1) w = 1;
     int h = src->height / factor; if (h < 1) h = 1;
     Image *dst = create_image(w, h, 255);
@@ -183,9 +188,10 @@ Image *shrink_avg(const Image *src, int factor) {
 
 /* ------------------ Filters (box, gaussian, median) ------------------ */
 
+// Box filter (mean filter) implementation
 Image *box_filter(const Image *src, int ksize) {
     if (ksize <= 1) return duplicate_image(src);
-    if (ksize % 2 == 0) ksize++;
+    if (ksize % 2 == 0) ksize++; // Ensure odd kernel size
     int r = ksize/2; int w = src->width, h = src->height;
     Image *dst = create_image(w,h,255);
     for (int y=0;y<h;y++){
@@ -204,9 +210,10 @@ Image *box_filter(const Image *src, int ksize) {
     return dst;
 }
 
+// Gaussian filter implementation
 Image *gaussian_filter(const Image *src, int ksize, double sigma) {
     if (ksize <= 1) return duplicate_image(src);
-    if (ksize % 2 == 0) ksize++;
+    if (ksize % 2 == 0) ksize++; // Ensure odd kernel size
     if (sigma <= 0) sigma = 1.0;
     int r = ksize/2; double *kernel = (double*)malloc(sizeof(double)*ksize*ksize);
     double sumk = 0.0;
@@ -216,7 +223,7 @@ Image *gaussian_filter(const Image *src, int ksize, double sigma) {
             kernel[(y+r)*ksize + (x+r)] = v; sumk += v;
         }
     }
-    for (int i=0;i<ksize*ksize;i++) kernel[i]/=sumk;
+    for (int i=0;i<ksize*ksize;i++) kernel[i]/=sumk; // Normalize kernel
     int w = src->width, h = src->height;
     Image *dst = create_image(w,h,255);
     for (int y=0;y<h;y++){
@@ -236,9 +243,10 @@ Image *gaussian_filter(const Image *src, int ksize, double sigma) {
     free(kernel); return dst;
 }
 
+// Median filter implementation
 Image *median_filter(const Image *src, int ksize) {
     if (ksize <= 1) return duplicate_image(src);
-    if (ksize % 2 == 0) ksize++;
+    if (ksize % 2 == 0) ksize++; // Ensure odd kernel size
     int r = ksize/2; int w = src->width, h = src->height;
     Image *dst = create_image(w,h,255);
     int maxcells = ksize*ksize; unsigned char *buf = (unsigned char*)malloc(maxcells);
@@ -252,8 +260,9 @@ Image *median_filter(const Image *src, int ksize) {
                     buf[cnt++]=src->data[yy*w + xx];
                 }
             }
+            // Sort pixel values using insertion sort
             for (int i=1;i<cnt;i++){ unsigned char key=buf[i]; int j=i-1; while(j>=0&&buf[j]>key){buf[j+1]=buf[j]; j--; } buf[j+1]=key; }
-            dst->data[y*w + x] = buf[cnt/2];
+            dst->data[y*w + x] = buf[cnt/2]; // Median value
         }
     }
     free(buf); return dst;
@@ -262,6 +271,7 @@ Image *median_filter(const Image *src, int ksize) {
 /* ------------------ Edge detectors ------------------ */
 /* (Sobel, Prewitt, Canny — same approach as earlier) */
 
+// Compute gradients using Sobel operator
 static void sobel_gradients(const Image *src, double *gx, double *gy, double *gmag) {
     int w = src->width, h = src->height;
     int Gx[3][3] = {{-1,0,1},{-2,0,2},{-1,0,1}};
@@ -284,6 +294,7 @@ static void sobel_gradients(const Image *src, double *gx, double *gy, double *gm
     }
 }
 
+// Sobel edge detection
 Image *sobel_edge(const Image *src) {
     int w = src->width, h = src->height;
     double *gx = (double*)calloc((size_t)w*h, sizeof(double));
@@ -296,6 +307,7 @@ Image *sobel_edge(const Image *src) {
     free(gx); free(gy); free(gmag); return dst;
 }
 
+// Prewitt edge detection
 Image *prewitt_edge(const Image *src) {
     int w = src->width, h = src->height;
     double *gmag = (double*)calloc((size_t)w*h, sizeof(double));
@@ -321,14 +333,15 @@ Image *prewitt_edge(const Image *src) {
     free(gmag); return dst;
 }
 
+// Canny edge detection
 Image *canny_edge(const Image *src, double low_ratio, double high_ratio) {
     if (low_ratio < 0) low_ratio = 0.05; if (high_ratio <= low_ratio) high_ratio = low_ratio * 3;
-    Image *smooth = gaussian_filter(src, 5, 1.0);
+    Image *smooth = gaussian_filter(src, 5, 1.0); // Step 1: Smooth
     int w = smooth->width, h = smooth->height;
     double *gx = (double*)calloc((size_t)w*h, sizeof(double));
     double *gy = (double*)calloc((size_t)w*h, sizeof(double));
     double *gmag = (double*)calloc((size_t)w*h, sizeof(double));
-    sobel_gradients(smooth, gx, gy, gmag);
+    sobel_gradients(smooth, gx, gy, gmag); // Step 2: Gradient
     double *nms = (double*)calloc((size_t)w*h, sizeof(double));
     for (int y=1;y<h-1;y++){
         for (int x=1;x<w-1;x++){
@@ -339,7 +352,7 @@ Image *canny_edge(const Image *src, double low_ratio, double high_ratio) {
             else if (angle >=22.5 && angle <67.5) { m1=gmag[idx - w + 1]; m2=gmag[idx + w -1]; }
             else if (angle >=67.5 && angle <112.5) { m1=gmag[idx - w]; m2=gmag[idx + w]; }
             else { m1=gmag[idx - w -1]; m2=gmag[idx + w +1]; }
-            nms[idx] = (m >= m1 && m >= m2) ? m : 0;
+            nms[idx] = (m >= m1 && m >= m2) ? m : 0; // Step 3: Non-maximum suppression
         }
     }
     double maxv = 0.0; for (int i=0;i<w*h;i++) if (nms[i] > maxv) maxv = nms[i]; if (maxv<=0) maxv=1.0;
@@ -355,6 +368,7 @@ Image *canny_edge(const Image *src, double low_ratio, double high_ratio) {
 }
 
 /* ------------------ LBP ------------------ */
+// Compute Local Binary Pattern (LBP) for each pixel
 Image *compute_lbp(const Image *src) {
     int w = src->width, h = src->height;
     Image *dst = create_image(w,h,255);
@@ -378,6 +392,7 @@ Image *compute_lbp(const Image *src) {
 
 /* ------------------ Diagnostics ------------------ */
 /* Returns sum of all pixel values (64-bit) */
+// Compute checksum (sum of all pixel values) for image
 unsigned long long image_checksum(const Image *img) {
     unsigned long long s = 0;
     size_t np = (size_t)img->width * img->height;
@@ -386,6 +401,7 @@ unsigned long long image_checksum(const Image *img) {
 }
 
 /* Print top-left 5x5 pixel block (or smaller if image smaller) */
+// Print a sample of the image (top-left 5x5 block)
 void print_sample(const Image *img) {
     int W = img->width, H = img->height;
     int sw = (W < 5) ? W : 5;
@@ -400,6 +416,7 @@ void print_sample(const Image *img) {
 }
 
 /* ------------------ Menu / Main ------------------ */
+// Print the main menu
 static void print_menu(void) {
     puts("\n===== Image Processing Application (PGM only) =====");
     puts("1 - Load a PGM image file (P2 or P5)");
@@ -420,11 +437,16 @@ static void print_menu(void) {
     printf("Enter option: ");
 }
 
+// Discard input line (helper function)
 static void read_line_discard(void) { int c; while ((c = getchar()) != '\n' && c != EOF); }
+// Read and validate integer input
 static int read_int_prompt(const char *prompt) { int v; printf("%s", prompt); while (scanf("%d", &v) != 1) { read_line_discard(); printf("Invalid. %s", prompt); } read_line_discard(); return v; }
+// Read and validate double input
 static double read_double_prompt(const char *prompt) { double v; printf("%s", prompt); while (scanf("%lf", &v) != 1) { read_line_discard(); printf("Invalid. %s", prompt); } read_line_discard(); return v; }
+// Read and trim string input
 static void read_string_prompt(const char *prompt, char *buf, size_t n) { printf("%s", prompt); if (!fgets(buf, (int)n, stdin)) { buf[0] = '\0'; return; } size_t L = strlen(buf); if (L > 0 && buf[L-1] == '\n') buf[L-1] = '\0'; }
 
+// Main program loop
 int main(void) {
     Image *img = NULL; Image *work = NULL; char filename[512];
     while (1) {
@@ -432,6 +454,7 @@ int main(void) {
         int opt; if (scanf("%d", &opt) != 1) { read_line_discard(); continue; } read_line_discard();
         if (opt == 0) break;
         if (opt == 1) {
+            // Load image file
             read_string_prompt("Enter file path to load (PGM P2/P5): ", filename, sizeof(filename));
             Image *tmp = load_pgm(filename);
             if (!tmp) printf("Failed to load %s\n", filename);
@@ -441,13 +464,14 @@ int main(void) {
                 printf("Loaded %s (%dx%d) maxval=%d\n", filename, img->width, img->height, img->maxval);
             }
         } else if (opt == 2) {
+            // Zoom or shrink image
             if (!work) { printf("No image loaded.\n"); continue; }
             int factor = read_int_prompt("Enter integer factor (e.g., 2, 3, 4...): ");
             if (factor < 1) { printf("Factor must be >=1\n"); continue; }
             printf("Zoom (z) or Shrink (s)? (z/s): ");
             int c = getchar(); read_line_discard();
             if (c == 'z' || c == 'Z') {
-                Image *out = zoom_bilinear(work, factor);
+                Image *out = zoom_nearest_neighbor(work, factor);
                 free_image(work); work = out;
                 printf("Zoomed by %dx -> new size: %dx%d\n", factor, work->width, work->height);
             } else if (c == 's' || c == 'S') {
@@ -457,6 +481,7 @@ int main(void) {
                 printf("Shrunk by %dx -> new size: %dx%d\n", factor, work->width, work->height);
             } else { printf("Invalid choice.\n"); }
         } else if (opt == 3) {
+            // Apply filter to image
             if (!work) { printf("No image loaded.\n"); continue; }
             printf("Choose filter: 1=box, 2=gaussian, 3=median : ");
             int f; if (scanf("%d", &f) != 1) { read_line_discard(); continue; } read_line_discard();
@@ -465,6 +490,7 @@ int main(void) {
             else if (f == 3) { int k = read_int_prompt("Kernel size (odd >=3, e.g. 3): "); Image *out = median_filter(work, k); free_image(work); work = out; printf("Applied median filter k=%d\n", k); }
             else printf("Invalid filter choice.\n");
         } else if (opt == 4) {
+            // Edge detection
             if (!work) { printf("No image loaded.\n"); continue; }
             printf("Choose edge detector: 1=Canny, 2=Sobel, 3=Prewitt : ");
             int e; if (scanf("%d", &e) != 1) { read_line_discard(); continue; } read_line_discard();
@@ -473,9 +499,11 @@ int main(void) {
             else if (e == 3) { Image *out = prewitt_edge(work); free_image(work); work = out; printf("Applied Prewitt\n"); }
             else printf("Invalid choice.\n");
         } else if (opt == 5) {
+            // Compute LBP
             if (!work) { printf("No image loaded.\n"); continue; }
             Image *out = compute_lbp(work); free_image(work); work = out; printf("Computed LBP\n");
         } else if (opt == 6) {
+            // Save image to file
             if (!work) { printf("No image loaded.\n"); continue; }
             char outfn[512]; read_string_prompt("Enter filename to save (e.g. out.pgm): ", outfn, sizeof(outfn));
             printf("Save as ASCII P2 or Binary P5? (p2/p5): ");
@@ -484,9 +512,11 @@ int main(void) {
             int ok = save_pgm(work, outfn, ascii);
             if (ok) printf("Saved %s (%s)\n", outfn, ascii ? "P2" : "P5"); else printf("Failed to save %s\n", outfn);
         } else if (opt == 7) {
+            // Show image info
             if (!work) { printf("No image loaded.\n"); continue; }
             printf("Image info: %dx%d maxval=%d\n", work->width, work->height, work->maxval);
         } else if (opt == 8) {
+            // Diagnostic: checksum and sample
             if (!work) { printf("No image loaded.\n"); continue; }
             unsigned long long csum = image_checksum(work);
             printf("Dimensions: %dx%d  checksum(sum of pixels) = %llu\n", work->width, work->height, csum);
